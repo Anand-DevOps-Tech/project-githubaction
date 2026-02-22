@@ -1,33 +1,115 @@
-version: '3.8'
+name: CICD pipeline
 
-services:
-  mysql:
-    image: mysql:8
-    container_name: mysql
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: Test@123
-      MYSQL_DATABASE: bankappdb
-    ports:
-      - "3306:3306"
-    networks:
-      - bankapp-net
+on:
+  push:
+    branches: [ "main" ]
 
-  bankapp:
-    image: anand1590/bankapp:latest
-    container_name: bankapp
-    restart: always
-    depends_on:
-      - mysql
-    environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/bankappdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: Test@123
-    ports:
-      - "8080:8080"
-    networks:
-      - bankapp-net
-
-networks:
-  bankapp-net:
-    driver: bridge
+jobs:
+  #steps 1: Compile and test job
+  test:
+    name: compile and test java project
+    runs-on: self-hosted
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+    - name: compile and test with maven
+      run: mvn test
+  #steps 2: Security scan job
+  security:
+    name: security scan with trivy
+    runs-on: self-hosted
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      # Install Trivy
+      - name: Install Trivy
+        run: |
+          sudo apt-get install wget gnupg -y
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy -y
+      # Run Trivy scan
+      - name: trivy sacn
+        run: trivy fs --format table -o fs-report.txt .
+      # upload the scan report as an artifact
+      - name: upload scan report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-report
+          path: fs-report.txt
+  #steps 3: Build and Sonar scan
+  build_project_and_sonar_scan:
+    runs-on: self-hosted
+    needs: security
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+    - name: Build project
+      run: mvn package
+    - name: upload scan report
+      uses: actions/upload-artifact@v4
+      with:
+          name: app-jar
+          path: target/*.jar
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: SonarQube Scan
+      uses: SonarSource/sonarqube-scan-action@v7.0.0
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+  #steps 4: Build Docker images/push and Deploy
+  build_dockerimage_and_push:
+    runs-on: self-hosted
+    needs: build_project_and_sonar_scan
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: app
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: anand1590/bankapp:latest
+          file: ./Dockerfile
+  deploy_docker_container:
+    runs-on: self-hosted
+    needs: build_dockerimage_and_push
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: pull latest Docker images/push
+        run: docker pull anand1590/bankapp:latest
+      - name: deploy with docker compose
+        run: |
+          docker-compose down
+          docker-compose up -d

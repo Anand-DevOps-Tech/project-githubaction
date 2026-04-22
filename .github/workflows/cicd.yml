@@ -5,10 +5,10 @@ on:
     branches: [ "main" ]
 
 jobs:
-  # step 1: Compile job
+  # step 1: Compile and test job
   compile:
-    name: Compile java project
-    runs-on: ubuntu-latest
+    name: Compile and test java project
+    runs-on: self-hosted
     steps:
     # Check out the repository
     - uses: actions/checkout@v4
@@ -21,11 +21,11 @@ jobs:
         cache: maven
     # Compile the project using Maven
     - name: Compile with Maven
-      run: mvn compile
+      run: mvn test
   # step 2: Security scan job
   security-scan:
     name: run security scan
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: compile
     steps:
     # check out the repository
